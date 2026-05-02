@@ -1,0 +1,358 @@
+# System Walkthrough: Competitive Math Quiz (Realtime)
+
+This document is a **full system-design walkthrough** for the “Competitive Math Quiz (Realtime)” project. It explains:
+
+- The **architecture** (frontend ↔ backend ↔ Redis/Postgres)
+- The **runtime flow** of a match (question → submissions → first-winner → next question)
+- The **data model** (PostgreSQL tables, keys, and why they’re shaped that way)
+- The **API routes** (HTTP) and **WebSocket message contract**
+
+---
+
+## High-level architecture
+
+### Components
+
+- **Frontend (React + Vite + Tailwind)**  
+  Renders the game UI, connects to the backend WebSocket, shows the current question in real time, submits answers, and displays the leaderboard.
+
+- **Backend (Node.js + Express + `ws`)**
+  - Serves HTTP routes for **user creation** and **leaderboard**
+  - Hosts a WebSocket endpoint for the **real-time game loop**
+  - Generates questions in memory and broadcasts them to clients
+
+- **Redis**
+  Enforces **“first correct answer wins”** using an atomic Lua script so that even if many clients submit simultaneously, **only one** is recorded as the winner.
+
+- **PostgreSQL**
+  Stores **users** and their **win counts** (high scores / leaderboard).
+
+### What is stored where?
+
+- **In memory (backend process)**: the *current question* (`current`) and difficulty progression (`questionSeq`)
+- **Redis**: per-question “winner lock” and “advance lock”
+- **PostgreSQL**: durable user identity + cumulative wins across sessions
+
+---
+
+## Runtime flow (end-to-end)
+
+This is the full lifecycle once the backend starts.
+
+### 1) Backend boot
+
+Backend entrypoint is `backend/src/server.js`.
+
+On startup it:
+
+- Validates connectivity:
+  - Calls `ensureSchema()` (Postgres) to create tables/extensions if missing
+  - Connects to Redis and pings it
+- If either dependency is unavailable, it **prints a helpful error** and exits.
+- If dependencies are healthy, it calls `nextQuestion("init")` and begins listening.
+
+### 2) Clients connect (WebSocket)
+
+Clients connect to WebSocket path:
+
+- **`ws://<backend-host>:8080/ws`**
+
+When a client connects, the server immediately sends:
+
+- `hello` (a simple handshake)
+- If there’s an active question, it sends the current `question` with reason `"sync"` so late joiners can play immediately.
+
+### 3) Question broadcast
+
+The server holds a single “current” question in memory:
+
+```js
+current = { id, prompt, answer, difficulty, createdAtMs }
+```
+
+When `nextQuestion()` is called, the server broadcasts:
+
+- `type: "question"`
+- `question: { id, prompt, difficulty, createdAtMs }`
+- `reason` (e.g. `"init"`, `"sync"`, `"winner"`)
+
+Important: the **answer is never broadcast** in the question message.
+
+### 4) Submissions arrive and are validated
+
+Clients submit via WebSocket message:
+
+- `type: "submit"`
+- `userId`, `name`, `answer`, `questionId`
+
+The server validates:
+
+- The submission’s `questionId` matches `current.id`  
+  If not: returns `result` with `"Stale question"`.
+- `userId` and `name` are present  
+  If not: returns `result` with `"Missing user"`.
+
+It also normalizes answers by trimming and removing whitespace so that `"  12 "` equals `"12"`.
+
+### 5) “First correct answer wins” (Redis)
+
+If the answer is correct, the server runs an **atomic Redis Lua script** against a key:
+
+- `quiz:winner:<questionId>`
+
+The script:
+
+- checks if the key exists
+- if it does: returns `0` (someone already won)
+- if it doesn’t: writes winner metadata and returns `1`
+
+This makes “first win” **race-safe** under concurrency.
+
+### 6) Single-advance protection (important for scaling)
+
+Even after a winner is chosen, the backend also ensures only one process instance performs the “advance/broadcast” step by taking a second Redis lock:
+
+- `quiz:advance:<questionId>`
+
+This is done using a second Lua script which performs:
+
+- `SET advanceKey nowMs NX PX 15000`
+
+So even if you later ran multiple backend instances, only one instance will:
+
+- update the winner’s win count in Postgres
+- broadcast the `winner` event
+- schedule the next question
+
+### 7) Persist winner to Postgres and broadcast
+
+When the server is the instance that is allowed to advance, it:
+
+- increments the winner’s `wins` in Postgres via `incrementWins(userId)`
+- broadcasts:
+  - `type: "winner"`
+  - `questionId`
+  - `winner: { userId, name, wins }`
+  - `answer` (the correct answer, shown *after* a win)
+
+Then it schedules the next question after a short pause (~900ms) so clients have time to see the winner.
+
+---
+
+## Dependency configuration (Docker + env)
+
+### Docker services
+
+`docker-compose.yml` provides:
+
+- **Redis** on `localhost:6379`
+- **Postgres** on `localhost:55432` (mapped from container `5432` to avoid local conflicts)
+
+### Backend environment variables
+
+From `backend/.env.example`:
+
+- **`PORT`**: backend HTTP/WebSocket port (default 8080)
+- **`CLIENT_ORIGIN`**: allowed browser origin for CORS (default `http://localhost:5173`)
+- **`REDIS_URL`**: Redis connection string
+- **`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`**: Postgres connection details
+- **`ADMIN_TOKEN`**: enables and protects the admin reset route
+
+---
+
+## Database design (PostgreSQL)
+
+Schema is created at runtime by `ensureSchema()` in `backend/src/db.js`. It intentionally avoids a migration tool for the assessment and keeps persistence minimal.
+
+### Tables
+
+#### `users`
+
+- **Purpose**: stable identity for a player name.
+- **Columns**
+  - `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+  - `name TEXT NOT NULL UNIQUE`
+  - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+
+Key behavior:
+
+- `name` is **unique**, so you can’t have duplicate usernames.
+- UUIDs are generated using Postgres `pgcrypto` (`gen_random_uuid()`).
+
+#### `user_scores`
+
+- **Purpose**: store the user’s accumulated win count (leaderboard).
+- **Columns**
+  - `user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE`
+  - `wins INTEGER NOT NULL DEFAULT 0`
+  - `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+
+Indexing:
+
+- `idx_user_scores_wins` on `(wins DESC)` supports fast leaderboard sorting.
+
+### Relationship
+
+It’s a strict **1:1 relationship**:
+
+- One `users` row ↔ one `user_scores` row (shared primary key `user_id`)
+
+This separation makes it easy to extend later (e.g., add more score modes/history without bloating the `users` table).
+
+### Core queries (what happens when)
+
+- **Create or reuse user** (`getOrCreateUserByName`)
+  - Transaction:
+    - If `users.name` exists: return it
+    - Else: insert into `users`, then insert into `user_scores` with wins 0
+
+- **Increment wins** (`incrementWins`)
+  - UPSERT:
+    - Insert `(user_id, wins=1)` if missing
+    - Otherwise `wins = wins + 1`, update timestamp
+
+- **Leaderboard** (`getLeaderboard`)
+  - Join `user_scores` to `users`
+  - Order by `wins DESC`, tie-break by earliest `created_at ASC`
+
+- **Admin reset** (`resetAllUsersAndScores`)
+  - `TRUNCATE user_scores, users` (together, so FK constraints are satisfied)
+
+---
+
+## Redis design (atomic concurrency)
+
+Redis is used purely for **concurrency control**, not persistence.
+
+### Keys
+
+- **Winner key**: `quiz:winner:<questionId>`
+  - Stored as a small hash:
+    - `userId`
+    - `wonAtMs`
+  - Has a TTL of **1 hour** (`PEXPIRE 3600000`)
+
+- **Advance key**: `quiz:advance:<questionId>`
+  - Stored as a string value (timestamp)
+  - NX lock with TTL **15 seconds**
+
+### Why Lua?
+
+Lua scripts in Redis guarantee the check-and-set is **atomic** on the server side. That prevents “double winners” in high concurrency situations where multiple correct submissions arrive within the same millisecond.
+
+---
+
+## Backend API surface
+
+Backend exposes:
+
+- **HTTP routes** (Express)
+- **WebSocket** real-time endpoint (`ws`)
+
+### HTTP routes
+
+Base URL: `http://localhost:8080` (default)
+
+#### `GET /health`
+
+- **Purpose**: simple health check
+- **Response**
+  - `{ ok: true }`
+
+#### `GET /leaderboard?limit=10`
+
+- **Purpose**: fetch top N players by wins
+- **Query params**
+  - `limit` (optional): clamped to [1..50], default 10
+- **Response**
+  - `{ leaderboard: [{ id, name, wins }, ...] }`
+
+#### `POST /users`
+
+- **Purpose**: create a user if it doesn’t exist, otherwise return existing user
+- **Body**
+  - `{ "name": "alice" }`
+- **Responses**
+  - 200: `{ user: { id, name } }`
+  - 400: `{ error: "..." }` (e.g., missing name or >32 chars)
+
+#### `POST /admin/reset`
+
+- **Purpose**: wipe all users and scores (dev/admin only)
+- **Auth**
+  - Requires header: `x-admin-token: <ADMIN_TOKEN>`
+  - If `ADMIN_TOKEN` isn’t set or token mismatches → 401
+- **Response**
+  - `{ ok: true }`
+
+### WebSocket endpoint
+
+- Path: **`/ws`**
+- Server sends JSON messages to all connected clients.
+
+#### Client → Server messages
+
+- **Ping**
+  - `{ "type": "ping" }`
+  - Server replies: `{ "type": "pong", "serverTimeMs": <number> }`
+
+- **Submit answer**
+  - `{ "type": "submit", "userId": "<uuid>", "name": "alice", "answer": "42", "questionId": "<currentId>" }`
+
+#### Server → Client messages
+
+- **Hello**
+  - `{ "type": "hello", "serverTimeMs": <number> }`
+
+- **Question**
+  - `{ "type": "question", "question": { "id": "...", "prompt": "(12 + 3) * 4", "difficulty": 2, "createdAtMs": ... }, "reason": "init|sync|winner", "serverTimeMs": ... }`
+
+- **Result** (response to a submission; sent back only to the submitting client)
+  - Correct but not first:
+    - `{ "type": "result", "ok": true, "correct": true, "won": false, "serverTimeMs": ... }`
+  - Correct and first:
+    - `{ "type": "result", "ok": true, "correct": true, "won": true, "advanced": true, "wins": <newWins>, "serverTimeMs": ... }`
+  - Incorrect:
+    - `{ "type": "result", "ok": true, "correct": false, "serverTimeMs": ... }`
+  - Invalid/stale:
+    - `{ "type": "result", "ok": false, "reason": "Stale question|Missing user|...", "serverTimeMs": ... }`
+
+- **Winner broadcast** (sent to everyone)
+  - `{ "type": "winner", "questionId": "...", "winner": { "userId": "...", "name": "alice", "wins": 3 }, "answer": "42", "serverTimeMs": ... }`
+
+---
+
+## Question generation and difficulty
+
+Questions are generated in `backend/src/questions.js`:
+
+- Only uses integer operations: `+`, `-`, `*`
+- Avoids negative results for `-` to reduce formatting confusion
+- Difficulty increases over time:
+  - `difficulty = min(1 + floor(questionSeq / 3), 10)`
+- At difficulty >= 3, a second operation is added (wrapped in parentheses)
+
+This design keeps answers fast to compute, easy to validate, and consistent across clients.
+
+---
+
+## CORS + local dev behavior
+
+Backend uses a conservative CORS policy:
+
+- Allows `CLIENT_ORIGIN` exactly (default `http://localhost:5173`)
+- Also allows any `http://localhost:<port>` / `http://127.0.0.1:<port>` for convenience in dev
+- Blocks everything else with an explicit error
+
+---
+
+## “Explain it in interviews” narrative (recommended)
+
+If you want a clean story to tell:
+
+- The game loop is real-time, so questions are pushed from server → clients via WebSocket.
+- The correctness check is on the server; clients never see the answer ahead of time.
+- Concurrency is the core: multiple clients can answer simultaneously, so Redis provides a single atomic “winner lock”.
+- Postgres stores durable scores and supports a leaderboard query with indexing.
+- The backend is designed so it can scale to multiple instances: even with multiple processes, the Redis “advance lock” ensures only one instance broadcasts the winner and advances the game.
+
