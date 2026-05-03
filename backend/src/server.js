@@ -38,11 +38,9 @@ const wss = new WebSocketServer({ server, path: "/ws" });
 
 const redis = createRedis();
 redis.on("error", (err) => {
-  // eslint-disable-next-line no-console
   console.error("[redis] error:", err?.message || err);
 });
 redis.on("connect", () => {
-  // eslint-disable-next-line no-console
   console.log("[redis] connected");
 });
 
@@ -112,7 +110,6 @@ async function tryWin({ userId, name, answer }) {
     return { ok: true, correct: true, won: false };
   }
 
-  // Ensure only one server instance performs the advance/broadcast for this question.
   const canAdvance = await redis.eval(LUA_TRY_ADVANCE, 1, advanceKey(qid), String(serverTimeMs()));
   if (Number(canAdvance) !== 1) {
     return { ok: true, correct: true, won: true, advanced: false };
@@ -127,7 +124,6 @@ async function tryWin({ userId, name, answer }) {
     serverTimeMs: serverTimeMs()
   });
 
-  // Short pause so slow clients see the winner before the next question.
   setTimeout(() => nextQuestion("winner"), 900);
 
   return { ok: true, correct: true, won: true, advanced: true, wins };
@@ -226,26 +222,21 @@ async function main() {
   }
 
   if (errors.length) {
-    // eslint-disable-next-line no-console
     console.error(errors.join("\n\n"));
     try {
       redis.disconnect();
-    } catch {
-      // ignore
-    }
+    } catch {}
     process.exit(1);
   }
 
   nextQuestion("init");
 
   server.listen(PORT, () => {
-    // eslint-disable-next-line no-console
     console.log(`Backend listening on http://localhost:${PORT}`);
   });
 }
 
 main().catch((e) => {
-  // eslint-disable-next-line no-console
   console.error(e);
   process.exit(1);
 });

@@ -6,7 +6,6 @@ function pick(arr) {
   return arr[randInt(0, arr.length - 1)];
 }
 
-// Generates integer-answer problems (fast to verify, avoids floats).
 export function generateQuestion(difficulty = 1) {
   const ops = ["+", "-", "*"];
   const op = pick(ops);
@@ -16,7 +15,6 @@ export function generateQuestion(difficulty = 1) {
   let b = randInt(1, scale);
 
   if (op === "-") {
-    // Keep non-negative to avoid input formatting confusion.
     if (b > a) [a, b] = [b, a];
   }
 
@@ -26,15 +24,10 @@ export function generateQuestion(difficulty = 1) {
   if (op === "-") answer = a - b;
   if (op === "*") answer = a * b;
 
-  // Add a second term for higher difficulty.
   if (difficulty >= 3) {
     const op2 = pick(ops);
     let c = randInt(1, Math.min(scale, 200));
     if (op2 === "-") {
-      // Ensure still non-negative overall by folding into expression:
-      // (a op b) op2 c where op2 is '-' can go negative; avoid by using '+'
-      // for the second op when difficulty increases.
-      // We'll remap '-' -> '+', keeping variety in op1.
       c = randInt(1, Math.min(scale, 200));
     }
     const safeOp2 = op2 === "-" ? "+" : op2;

@@ -97,7 +97,7 @@ function App() {
             setStatus("You won! Next question incoming…");
         }
       } catch {
-        // ignore
+        void 0;
       }
     };
     return () => {

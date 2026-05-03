@@ -11,8 +11,6 @@ export const pool = new Pool({
 });
 
 export async function ensureSchema() {
-  // Lightweight runtime check: create tables if missing.
-  // This avoids relying on a migration tool for the assessment.
   await pool.query(`
     CREATE EXTENSION IF NOT EXISTS pgcrypto;
     CREATE TABLE IF NOT EXISTS users (
@@ -86,7 +84,6 @@ export async function getLeaderboard(limit = 10) {
 }
 
 export async function resetAllUsersAndScores() {
-  // Truncate together to satisfy FK constraints.
   await pool.query("TRUNCATE TABLE user_scores, users");
 }
 

@@ -21,7 +21,7 @@ Note: this repo maps Postgres to **localhost:55432** (to avoid conflicts with ex
 
 ### What to do locally
 
-In `backend/`, copy the example file:
+In backend/, copy the example file:
 
 ```bash
 cp .env.example .env
