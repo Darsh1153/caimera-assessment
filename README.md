@@ -19,6 +19,14 @@ docker compose up -d
 
 Note: this repo maps Postgres to **localhost:55432** (to avoid conflicts with existing Postgres installs).
 
+### What to do locally
+
+In `backend/`, copy the example file:
+
+```bash
+cp .env.example .env
+```
+
 Start backend:
 
 ```bash
@@ -41,4 +49,3 @@ Open `http://localhost:5173` in **two** browser windows and race.
 
 - Backend env: `backend/.env` (see `backend/.env.example`)
 - Frontend env: `frontend/.env` (Vite var `VITE_BACKEND_URL`)
-
