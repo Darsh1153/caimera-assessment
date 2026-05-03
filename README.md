@@ -37,14 +37,6 @@ npm run dev
 
 Open `http://localhost:5173` in **two** browser windows and race.
 
-## How “first answer wins” works
-
-- Each question has an id (e.g. `173...-7`).
-- On a correct submission, the backend runs an **atomic Redis script** (`SETNX` equivalent) on a key:
-  - `quiz:winner:<questionId>`
-- Only the first correct submit can create that key, so only that submit is the winner.
-- A second Redis key `quiz:advance:<questionId>` ensures only one server instance advances/broadcasts.
-
 ## Environment
 
 - Backend env: `backend/.env` (see `backend/.env.example`)
