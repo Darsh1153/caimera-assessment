@@ -2,13 +2,24 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-export const pool = new Pool({
-  host: process.env.PGHOST,
-  port: process.env.PGPORT ? Number(process.env.PGPORT) : undefined,
-  user: process.env.PGUSER,
-  password: process.env.PGPASSWORD,
-  database: process.env.PGDATABASE
-});
+function poolConfig() {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (databaseUrl) {
+    return {
+      connectionString: databaseUrl,
+      ssl: { rejectUnauthorized: false }
+    };
+  }
+  return {
+    host: process.env.PGHOST,
+    port: process.env.PGPORT ? Number(process.env.PGPORT) : undefined,
+    user: process.env.PGUSER,
+    password: process.env.PGPASSWORD,
+    database: process.env.PGDATABASE
+  };
+}
+
+export const pool = new Pool(poolConfig());
 
 export async function ensureSchema() {
   await pool.query(`

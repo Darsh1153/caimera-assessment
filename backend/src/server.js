@@ -9,10 +9,23 @@ import { createRedis, LUA_TRY_ADVANCE, LUA_TRY_WIN } from "./redis.js";
 import { generateQuestion } from "./questions.js";
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8080;
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
+
+const allowedOrigins = (process.env.CLIENT_ORIGIN || "http://localhost:5173")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 const app = express();
-app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      callback(null, false);
+    },
+    credentials: true
+  })
+);
 app.use(express.json());
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
