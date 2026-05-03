@@ -5,9 +5,11 @@ const { Pool } = pg;
 function poolConfig() {
   const databaseUrl = process.env.DATABASE_URL;
   if (databaseUrl) {
+    const needsSsl =
+      /[.@]render\.com\b/i.test(databaseUrl) || /sslmode=require/i.test(databaseUrl);
     return {
       connectionString: databaseUrl,
-      ssl: { rejectUnauthorized: false }
+      ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {})
     };
   }
   return {
