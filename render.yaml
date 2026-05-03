@@ -1,0 +1,61 @@
+# Render Blueprint: backend (Node), frontend (Vite static + preview), Postgres, Redis.
+# https://render.com/docs/infrastructure-as-code
+#
+# Before first deploy: pick unique service names below (globally unique on *.onrender.com).
+# If "name already taken", change caimera-math-quiz-api / caimera-math-quiz-web and update
+# CLIENT_ORIGIN + VITE_BACKEND_URL to match https://<your-service-name>.onrender.com
+
+databases:
+  - name: caimera-math-quiz-db
+    databaseName: quiz
+    user: quiz
+    plan: free
+
+services:
+  - type: keyvalue
+    name: caimera-math-quiz-redis
+    plan: free
+    maxmemoryPolicy: noeviction
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: Render platform access
+
+  - type: web
+    name: caimera-math-quiz-api
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20.18.0"
+      - key: CLIENT_ORIGIN
+        value: https://caimera-math-quiz-web.onrender.com
+      - key: DATABASE_URL
+        fromDatabase:
+          name: caimera-math-quiz-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: caimera-math-quiz-redis
+          type: keyvalue
+          property: connectionString
+
+  - type: web
+    name: caimera-math-quiz-web
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "20.18.0"
+      - key: NPM_CONFIG_PRODUCTION
+        value: "false"
+      - key: VITE_BACKEND_URL
+        value: https://caimera-math-quiz-api.onrender.com
