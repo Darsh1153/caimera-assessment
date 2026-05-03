@@ -2,13 +2,15 @@ import Redis from "ioredis";
 
 export function createRedis() {
   const url = process.env.REDIS_URL || "redis://localhost:6379";
+  const isTls = url.startsWith("rediss://");
   const redis = new Redis(url, {
     lazyConnect: true,
     maxRetriesPerRequest: null,
     enableReadyCheck: true,
     retryStrategy: (times) => {
       return Math.min(1000 * 2 ** Math.min(times, 5), 10000);
-    }
+    },
+    ...(isTls ? { tls: { rejectUnauthorized: false } } : {})
   });
   return redis;
 }
